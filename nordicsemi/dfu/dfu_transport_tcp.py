@@ -43,8 +43,8 @@ import logging
 import struct
 
 # Python 3rd party imports
-from serial import Serial
-from serial.serialutil import SerialException
+import socket
+import sys
 
 # Nordic Semiconductor imports
 from nordicsemi.dfu.dfu_transport   import DfuTransport, DfuEvent, TRANSPORT_LOGGING_LEVEL
@@ -60,6 +60,11 @@ class ValidationException(NordicSemiException):
 
 
 logger = logging.getLogger(__name__)
+
+def closeSockAndExit(sock):
+    sock.close()
+    sys.exit()
+
 
 class Slip:
     SLIP_BYTE_END             = 0o300
@@ -113,31 +118,36 @@ class Slip:
         return (finished, current_state, decoded_data)
 
 class DFUAdapter:
-    def __init__(self, serial_port):
-        self.serial_port = serial_port
+    def __init__(self, sock, timeout):
+        self.sock = sock
+        sock.settimeout(timeout)
+        self.stop_process = False
+
+    def stop(self):
+        self.stop_process = True
 
     def send_message(self, data):
-        packet = Slip.encode(data)
+        packet = bytes(Slip.encode(data))
         logger.log(TRANSPORT_LOGGING_LEVEL, 'SLIP: --> ' + str(data))
         try:
-            self.serial_port.write(packet)
-        except SerialException as e:
-            raise NordicSemiException('Writing to serial port failed: ' + str(e) + '. '
-                                      'If MSD is enabled on the target device, try to disable it ref. '
-                                      'https://wiki.segger.com/index.php?title=J-Link-OB_SAM3U')
+            self.sock.send(packet)
+        except socket.error as e:
+            logger.log(TRANSPORT_LOGGING_LEVEL, 'Writing to TCP failed: ' + str(e))
+            closeSockAndExit(self.sock)
 
     def get_message(self):
         current_state = Slip.SLIP_STATE_DECODING
         finished = False
         decoded_data = []
 
-        while finished == False:
-            byte = self.serial_port.read(1)
-            if byte:
+        while finished == False and self.stop_process == False:
+            try:
+                byte = self.sock.recv(1)
                 (byte) = struct.unpack('B', byte)[0]
                 (finished, current_state, decoded_data) \
-                   = Slip.decode_add_byte(byte, decoded_data, current_state)
-            else:
+                = Slip.decode_add_byte(byte, decoded_data, current_state)
+            except socket.error as e:
+                logger.log(TRANSPORT_LOGGING_LEVEL, "tcp timed out")
                 current_state = Slip.SLIP_STATE_CLEARING_INVALID_PACKET
                 return None
 
@@ -145,12 +155,10 @@ class DFUAdapter:
 
         return decoded_data
 
-class DfuTransportSerial(DfuTransport):
+class DfuTransportTCP(DfuTransport):
 
-    DEFAULT_BAUD_RATE = 115200
-    DEFAULT_FLOW_CONTROL = False
     DEFAULT_TIMEOUT = 30.0  # Timeout time for board response
-    DEFAULT_SERIAL_PORT_TIMEOUT = 1.0  # Timeout time on serial port read
+    DEFAULT_TCP_PORT_TIMEOUT = 1.0  # Timeout time on serial port read
     DEFAULT_PRN                 = 0
     DEFAULT_DO_PING = True
 
@@ -168,39 +176,28 @@ class DfuTransportSerial(DfuTransport):
     }
 
     def __init__(self,
-                 com_port,
-                 baud_rate=DEFAULT_BAUD_RATE,
-                 flow_control=DEFAULT_FLOW_CONTROL,
+                 sock,
                  timeout=DEFAULT_TIMEOUT,
                  prn=DEFAULT_PRN,
                  do_ping=DEFAULT_DO_PING):
 
         super().__init__()
-        self.com_port = com_port
-        self.baud_rate = baud_rate
-        self.flow_control = 1 if flow_control else 0
+        self.sock = sock
         self.timeout = timeout
         self.prn         = prn
-        self.serial_port = None
         self.dfu_adapter = None
         self.ping_id     = 0
         self.do_ping     = do_ping
 
         self.mtu         = 0
 
-        """:type: serial.Serial """
-
+    def stop(self):
+        if self.dfu_adapter:
+            self.dfu_adapter.stop()
 
     def open(self):
         super().open()
-        try:
-            self.__ensure_bootloader()
-            self.serial_port = Serial(port=self.com_port,
-                baudrate=self.baud_rate, rtscts=self.flow_control, timeout=self.DEFAULT_SERIAL_PORT_TIMEOUT)
-            self.dfu_adapter = DFUAdapter(self.serial_port)
-        except OSError as e:
-            raise NordicSemiException("Serial port could not be opened on {0}"
-              ". Reason: {1}".format(self.com_port, e.strerror))
+        self.dfu_adapter = DFUAdapter(self.sock, timeout=self.DEFAULT_TCP_PORT_TIMEOUT)
 
         if self.do_ping:
             ping_success = False
@@ -211,7 +208,9 @@ class DfuTransportSerial(DfuTransport):
                     ping_success = True
 
             if ping_success == False:
-                raise NordicSemiException("No ping response after opening COM port")
+                self.sock.close()
+                #close my thread only
+                sys.exit()
 
         self.__set_prn()
         self.__get_mtu()
@@ -255,7 +254,8 @@ class DfuTransportSerial(DfuTransport):
             self.__stream_data(data=init_packet)
             self.__execute()
         except ValidationException:
-            raise NordicSemiException("Failed to send init packet")
+            logger.log(TRANSPORT_LOGGING_LEVEL, "Failed to send init packet")
+            closeSockAndExit(self.sock)
 
     def send_firmware(self, firmware):
         def try_to_recover():
@@ -301,87 +301,40 @@ class DfuTransportSerial(DfuTransport):
                 response['crc'] = self.__stream_data(data=data, crc=response['crc'], offset=i)
                 self.__execute()
             except ValidationException:
-                raise NordicSemiException("Failed to send firmware")
+                logger.log(TRANSPORT_LOGGING_LEVEL, "Failed to send firmware")
+                closeSockAndExit(self.sock)
 
             self._send_event(event_type=DfuEvent.PROGRESS_EVENT, progress=len(data))
 
-    def __ensure_bootloader(self):
-        lister = DeviceLister()
-
-        device = None
-        start = datetime.now()
-        while not device and datetime.now() - start < timedelta(seconds=self.timeout):
-            time.sleep(0.5)
-            device = lister.get_device(com=self.com_port)
-
-        if device:
-            device_serial_number = device.serial_number
-
-            if not self.__is_device_in_bootloader_mode(device):
-                retry_count = 10
-                wait_time_ms = 500
-
-                trigger = DFUTrigger()
-                try:
-                    trigger.enter_bootloader_mode(device)
-                    logger.info("Serial: DFU bootloader was triggered")
-                except NordicSemiException as err:
-                    logger.error(err)
-
-
-                for checks in range(retry_count):
-                    logger.info("Serial: Waiting {} ms for device to enter bootloader {}/{} time"\
-                    .format(500, checks + 1, retry_count))
-
-                    time.sleep(wait_time_ms / 1000.0)
-
-                    device = lister.get_device(serial_number=device_serial_number)
-                    if self.__is_device_in_bootloader_mode(device):
-                        self.com_port = device.get_first_available_com_port()
-                        break
-
-                trigger.clean()
-            if not self.__is_device_in_bootloader_mode(device):
-                logger.info("Serial: Device is either not in bootloader mode, or using an unsupported bootloader.")
-
-    def __is_device_in_bootloader_mode(self, device):
-        if not device:
-            return False
-
-        #  Return true if nrf bootloader or Jlink interface detected.
-        return ((device.vendor_id.lower() == '1915' and device.product_id.lower() == '521f') # nRF52 SDFU USB
-             or (device.vendor_id.lower() == '1366' and device.product_id.lower() == '0105') # JLink CDC UART Port
-             or (device.vendor_id.lower() == '1366' and device.product_id.lower() == '1015'))# JLink CDC UART Port (MSD)
-
     def __set_prn(self):
-        logger.debug("Serial: Set Packet Receipt Notification {}".format(self.prn))
-        self.dfu_adapter.send_message([DfuTransportSerial.OP_CODE['SetPRN']]
+        logger.debug("TCP: Set Packet Receipt Notification {}".format(self.prn))
+        self.dfu_adapter.send_message([DfuTransportTCP.OP_CODE['SetPRN']]
             + list(struct.pack('<H', self.prn)))
-        self.__get_response(DfuTransportSerial.OP_CODE['SetPRN'])
+        self.__get_response(DfuTransportTCP.OP_CODE['SetPRN'])
 
     def __get_mtu(self):
-        self.dfu_adapter.send_message([DfuTransportSerial.OP_CODE['GetSerialMTU']])
-        response = self.__get_response(DfuTransportSerial.OP_CODE['GetSerialMTU'])
+        self.dfu_adapter.send_message([DfuTransportTCP.OP_CODE['GetSerialMTU']])
+        response = self.__get_response(DfuTransportTCP.OP_CODE['GetSerialMTU'])
 
         self.mtu = struct.unpack('<H', bytearray(response))[0]
 
     def __ping(self):
         self.ping_id = (self.ping_id + 1) % 256
 
-        self.dfu_adapter.send_message([DfuTransportSerial.OP_CODE['Ping'], self.ping_id])
+        self.dfu_adapter.send_message([DfuTransportTCP.OP_CODE['Ping'], self.ping_id])
         resp = self.dfu_adapter.get_message() # Receive raw response to check return code
 
         if not resp:
-            logger.debug('Serial: No ping response')
+            logger.debug('TCP: No ping response')
             return False
 
-        if resp[0] != DfuTransportSerial.OP_CODE['Response']:
-            logger.debug('Serial: No Response: 0x{:02X}'.format(resp[0]))
+        if resp[0] != DfuTransportTCP.OP_CODE['Response']:
+            logger.debug('TCP: No Response: 0x{:02X}'.format(resp[0]))
             return False
 
-        if resp[1] != DfuTransportSerial.OP_CODE['Ping']:
-            logger.debug('Serial: Unexpected Executed OP_CODE.\n' \
-                + 'Expected: 0x{:02X} Received: 0x{:02X}'.format(DfuTransportSerial.OP_CODE['Ping'], resp[1]))
+        if resp[1] != DfuTransportTCP.OP_CODE['Ping']:
+            logger.debug('TCP: Unexpected Executed OP_CODE.\n' \
+                + 'Expected: 0x{:02X} Received: 0x{:02X}'.format(DfuTransportTCP.OP_CODE['Ping'], resp[1]))
             return False
 
         if resp[2] != DfuTransport.RES_CODE['Success']:
@@ -400,25 +353,26 @@ class DfuTransportSerial(DfuTransport):
         self.__create_object(0x02, size)
 
     def __create_object(self, object_type, size):
-        self.dfu_adapter.send_message([DfuTransportSerial.OP_CODE['CreateObject'], object_type]\
+        self.dfu_adapter.send_message([DfuTransportTCP.OP_CODE['CreateObject'], object_type]\
                                             + list(struct.pack('<L', size)))
-        self.__get_response(DfuTransportSerial.OP_CODE['CreateObject'])
+        self.__get_response(DfuTransportTCP.OP_CODE['CreateObject'])
 
     def __calculate_checksum(self):
-        self.dfu_adapter.send_message([DfuTransportSerial.OP_CODE['CalcChecSum']])
-        response = self.__get_response(DfuTransportSerial.OP_CODE['CalcChecSum'])
+        self.dfu_adapter.send_message([DfuTransportTCP.OP_CODE['CalcChecSum']])
+        response = self.__get_response(DfuTransportTCP.OP_CODE['CalcChecSum'])
 
         if response is None:
-            raise NordicSemiException('Did not receive checksum response from DFU target. '
-                                      'If MSD is enabled on the target device, try to disable it ref. '
-                                      'https://wiki.segger.com/index.php?title=J-Link-OB_SAM3U')
+            logger.log(TRANSPORT_LOGGING_LEVEL, 'Did not receive checksum response from DFU target. '
+                                                'If MSD is enabled on the target device, try to disable it ref. '
+                                                'https://wiki.segger.com/index.php?title=J-Link-OB_SAM3U')
+            closeSockAndExit(self.sock)
 
         (offset, crc) = struct.unpack('<II', bytearray(response))
         return {'offset': offset, 'crc': crc}
 
     def __execute(self):
-        self.dfu_adapter.send_message([DfuTransportSerial.OP_CODE['Execute']])
-        self.__get_response(DfuTransportSerial.OP_CODE['Execute'])
+        self.dfu_adapter.send_message([DfuTransportTCP.OP_CODE['Execute']])
+        self.__get_response(DfuTransportTCP.OP_CODE['Execute'])
 
     def __select_command(self):
         return self.__select_object(0x01)
@@ -427,32 +381,35 @@ class DfuTransportSerial(DfuTransport):
         return self.__select_object(0x02)
 
     def __select_object(self, object_type):
-        logger.debug("Serial: Selecting Object: type:{}".format(object_type))
-        self.dfu_adapter.send_message([DfuTransportSerial.OP_CODE['ReadObject'], object_type])
+        logger.debug("TCP: Selecting Object: type:{}".format(object_type))
+        self.dfu_adapter.send_message([DfuTransportTCP.OP_CODE['ReadObject'], object_type])
 
-        response = self.__get_response(DfuTransportSerial.OP_CODE['ReadObject'])
+        response = self.__get_response(DfuTransportTCP.OP_CODE['ReadObject'])
         (max_size, offset, crc)= struct.unpack('<III', bytearray(response))
 
-        logger.debug("Serial: Object selected: " +
+        logger.debug("TCP: Object selected: " +
             " max_size:{} offset:{} crc:{}".format(max_size, offset, crc))
         return {'max_size': max_size, 'offset': offset, 'crc': crc}
 
     def __get_checksum_response(self):
-        resp = self.__get_response(DfuTransportSerial.OP_CODE['CalcChecSum'])
+        resp = self.__get_response(DfuTransportTCP.OP_CODE['CalcChecSum'])
 
         (offset, crc) = struct.unpack('<II', bytearray(resp))
         return {'offset': offset, 'crc': crc}
 
     def __stream_data(self, data, crc=0, offset=0):
-        logger.debug("Serial: Streaming Data: " +
+        logger.debug("TCP: Streaming Data: " +
             "len:{0} offset:{1} crc:0x{2:08X}".format(len(data), offset, crc))
         def validate_crc():
             if (crc != response['crc']):
-                raise ValidationException('Failed CRC validation.\n'\
+                logger.log(TRANSPORT_LOGGING_LEVEL, 'Failed CRC validation.\n'\
                                 + 'Expected: {} Received: {}.'.format(crc, response['crc']))
+                closeSockAndExit(self.sock)
+                
             if (offset != response['offset']):
-                raise ValidationException('Failed offset validation.\n'\
+                logger.log(TRANSPORT_LOGGING_LEVEL, 'Failed offset validation.\n'\
                                 + 'Expected: {} Received: {}.'.format(offset, response['offset']))
+                closeSockAndExit(self.sock)
 
         current_pnr     = 0
 
@@ -461,7 +418,7 @@ class DfuTransportSerial(DfuTransport):
             # here the maximum data size is self.mtu/2,
             # due to the slip encoding which at maximum doubles the size
             to_transmit = data[i:i + (self.mtu-1)//2 - 1 ]
-            to_transmit = struct.pack('B',DfuTransportSerial.OP_CODE['WriteObject']) + to_transmit
+            to_transmit = struct.pack('B',DfuTransportTCP.OP_CODE['WriteObject']) + to_transmit
 
             self.dfu_adapter.send_message(list(to_transmit))
             crc     = binascii.crc32(to_transmit[1:], crc) & 0xFFFFFFFF
@@ -484,12 +441,14 @@ class DfuTransportSerial(DfuTransport):
         if not resp:
             return None
 
-        if resp[0] != DfuTransportSerial.OP_CODE['Response']:
-            raise NordicSemiException('No Response: 0x{:02X}'.format(resp[0]))
+        if resp[0] != DfuTransportTCP.OP_CODE['Response']:
+            logger.log(TRANSPORT_LOGGING_LEVEL, 'No Response: 0x{:02X}'.format(resp[0]))
+            closeSockAndExit(self.sock)
 
         if resp[1] != operation:
-            raise NordicSemiException('Unexpected Executed OP_CODE.\n' \
+            logger.log(TRANSPORT_LOGGING_LEVEL, 'Unexpected Executed OP_CODE.\n' \
                              + 'Expected: 0x{:02X} Received: 0x{:02X}'.format(operation, resp[1]))
+            closeSockAndExit(self.sock)
 
         if resp[2] == DfuTransport.RES_CODE['Success']:
             return resp[3:]
@@ -499,7 +458,9 @@ class DfuTransportSerial(DfuTransport):
                 data = DfuTransport.EXT_ERROR_CODE[resp[3]]
             except IndexError:
                 data = "Unsupported extended error type {}".format(resp[3])
-            raise NordicSemiException('Extended Error 0x{:02X}: {}'.format(resp[3], data))
+            logger.log(TRANSPORT_LOGGING_LEVEL, 'Extended Error 0x{:02X}: {}'.format(resp[3], data))
+            closeSockAndExit(self.sock)
         else:
-            raise NordicSemiException('Response Code {}'.format(
+            logger.log(TRANSPORT_LOGGING_LEVEL, 'Response Code {}'.format(
                 get_dict_key(DfuTransport.RES_CODE, resp[2])))
+            closeSockAndExit(self.sock)
