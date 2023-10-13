@@ -1164,7 +1164,7 @@ def do_TCP(package, sock, connect_delay, packet_receipt_notification, ping,
 
     logger = logging.getLogger()
     logger.setLevel(logging.DEBUG)
-    
+
     if ping is None:
         ping = False
 
@@ -1196,6 +1196,10 @@ def do_TCP(package, sock, connect_delay, packet_receipt_notification, ping,
               type=click.Path(exists=True, resolve_path=True,
                               file_okay=True, dir_okay=False),
               required=True)
+@click.option('-h', '--host',
+              help='TCP IP address to which the server is connected. ',
+              type=click.STRING,
+              required=True)
 @click.option('-p', '--port',
               help='TCP port address to which the server is connected. ',
               type=click.INT,
@@ -1212,14 +1216,14 @@ def do_TCP(package, sock, connect_delay, packet_receipt_notification, ping,
               help='Set the timeout in seconds for board to respond (default: 30 seconds)',
               type=click.INT,
               required=False)
-def TCP(package, port, connect_delay, packet_receipt_notification, timeout):
+def TCP(package, host, port, connect_delay, packet_receipt_notification, timeout):
 
     # Register the signal handlers
     signal.signal(signal.SIGTERM, service_shutdown)
     signal.signal(signal.SIGINT, service_shutdown)
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(("127.0.0.1", port))
+    s.bind((host, port))
     logger.info("socket binded to port", port)
 
     # put the socket into listening mode

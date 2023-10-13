@@ -61,7 +61,8 @@ class ValidationException(NordicSemiException):
 
 logger = logging.getLogger(__name__)
 
-def closeSockAndExit(sock):
+def closeSockAndExit(sock, reason):
+    logger.debug(TRANSPORT_LOGGING_LEVEL, reason)
     sock.close()
     sys.exit()
 
@@ -132,8 +133,7 @@ class DFUAdapter:
         try:
             self.sock.send(packet)
         except socket.error as e:
-            logger.log(TRANSPORT_LOGGING_LEVEL, 'Writing to TCP failed: ' + str(e))
-            closeSockAndExit(self.sock)
+            closeSockAndExit(self.sock, 'Writing to TCP failed: ' + str(e))
 
     def get_message(self):
         current_state = Slip.SLIP_STATE_DECODING
@@ -143,9 +143,12 @@ class DFUAdapter:
         while finished == False and self.stop_process == False:
             try:
                 byte = self.sock.recv(1)
-                (byte) = struct.unpack('B', byte)[0]
-                (finished, current_state, decoded_data) \
-                = Slip.decode_add_byte(byte, decoded_data, current_state)
+                if byte == b'':
+                    closeSockAndExit(self.sock, "client disconnected")
+                else:
+                    (byte) = struct.unpack('B', byte)[0]
+                    (finished, current_state, decoded_data) \
+                    = Slip.decode_add_byte(byte, decoded_data, current_state)
             except socket.error as e:
                 logger.log(TRANSPORT_LOGGING_LEVEL, "tcp timed out")
                 current_state = Slip.SLIP_STATE_CLEARING_INVALID_PACKET
@@ -208,9 +211,7 @@ class DfuTransportTCP(DfuTransport):
                     ping_success = True
 
             if ping_success == False:
-                self.sock.close()
-                #close my thread only
-                sys.exit()
+                closeSockAndExit(self.sock, "DFU attempt time out, no response on socket")
 
         self.__set_prn()
         self.__get_mtu()
@@ -254,8 +255,7 @@ class DfuTransportTCP(DfuTransport):
             self.__stream_data(data=init_packet)
             self.__execute()
         except ValidationException:
-            logger.log(TRANSPORT_LOGGING_LEVEL, "Failed to send init packet")
-            closeSockAndExit(self.sock)
+            closeSockAndExit(self.sock, "Failed to send init packet")
 
     def send_firmware(self, firmware):
         def try_to_recover():
@@ -301,8 +301,7 @@ class DfuTransportTCP(DfuTransport):
                 response['crc'] = self.__stream_data(data=data, crc=response['crc'], offset=i)
                 self.__execute()
             except ValidationException:
-                logger.log(TRANSPORT_LOGGING_LEVEL, "Failed to send firmware")
-                closeSockAndExit(self.sock)
+                closeSockAndExit(self.sock, "Failed to send firmware")
 
             self._send_event(event_type=DfuEvent.PROGRESS_EVENT, progress=len(data))
 
@@ -362,10 +361,9 @@ class DfuTransportTCP(DfuTransport):
         response = self.__get_response(DfuTransportTCP.OP_CODE['CalcChecSum'])
 
         if response is None:
-            logger.log(TRANSPORT_LOGGING_LEVEL, 'Did not receive checksum response from DFU target. '
-                                                'If MSD is enabled on the target device, try to disable it ref. '
-                                                'https://wiki.segger.com/index.php?title=J-Link-OB_SAM3U')
-            closeSockAndExit(self.sock)
+            closeSockAndExit(self.sock, 'Did not receive checksum response from DFU target. '
+                                        'If MSD is enabled on the target device, try to disable it ref. '
+                                        'https://wiki.segger.com/index.php?title=J-Link-OB_SAM3U')
 
         (offset, crc) = struct.unpack('<II', bytearray(response))
         return {'offset': offset, 'crc': crc}
@@ -402,14 +400,12 @@ class DfuTransportTCP(DfuTransport):
             "len:{0} offset:{1} crc:0x{2:08X}".format(len(data), offset, crc))
         def validate_crc():
             if (crc != response['crc']):
-                logger.log(TRANSPORT_LOGGING_LEVEL, 'Failed CRC validation.\n'\
+                closeSockAndExit(self.sock, 'Failed CRC validation.\n'\
                                 + 'Expected: {} Received: {}.'.format(crc, response['crc']))
-                closeSockAndExit(self.sock)
                 
             if (offset != response['offset']):
-                logger.log(TRANSPORT_LOGGING_LEVEL, 'Failed offset validation.\n'\
+                closeSockAndExit(self.sock, 'Failed offset validation.\n'\
                                 + 'Expected: {} Received: {}.'.format(offset, response['offset']))
-                closeSockAndExit(self.sock)
 
         current_pnr     = 0
 
@@ -442,13 +438,11 @@ class DfuTransportTCP(DfuTransport):
             return None
 
         if resp[0] != DfuTransportTCP.OP_CODE['Response']:
-            logger.log(TRANSPORT_LOGGING_LEVEL, 'No Response: 0x{:02X}'.format(resp[0]))
-            closeSockAndExit(self.sock)
+            closeSockAndExit(self.sock, 'No Response: 0x{:02X}'.format(resp[0]))
 
         if resp[1] != operation:
-            logger.log(TRANSPORT_LOGGING_LEVEL, 'Unexpected Executed OP_CODE.\n' \
+            closeSockAndExit(self.sock, 'Unexpected Executed OP_CODE.\n' \
                              + 'Expected: 0x{:02X} Received: 0x{:02X}'.format(operation, resp[1]))
-            closeSockAndExit(self.sock)
 
         if resp[2] == DfuTransport.RES_CODE['Success']:
             return resp[3:]
@@ -458,9 +452,7 @@ class DfuTransportTCP(DfuTransport):
                 data = DfuTransport.EXT_ERROR_CODE[resp[3]]
             except IndexError:
                 data = "Unsupported extended error type {}".format(resp[3])
-            logger.log(TRANSPORT_LOGGING_LEVEL, 'Extended Error 0x{:02X}: {}'.format(resp[3], data))
-            closeSockAndExit(self.sock)
+            closeSockAndExit(self.sock, 'Extended Error 0x{:02X}: {}'.format(resp[3], data))
         else:
-            logger.log(TRANSPORT_LOGGING_LEVEL, 'Response Code {}'.format(
+            closeSockAndExit(self.sock, 'Response Code {}'.format(
                 get_dict_key(DfuTransport.RES_CODE, resp[2])))
-            closeSockAndExit(self.sock)
