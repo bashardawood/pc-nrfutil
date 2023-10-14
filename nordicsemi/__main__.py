@@ -1230,6 +1230,10 @@ def TCP(package, host, port, connect_delay, packet_receipt_notification, timeout
     s.listen(5)
     print("socket is listening")
 
+    if not packet_receipt_notification:
+        packet_receipt_notification = 0
+
+
     sockthread = threading.Thread(target=tcpThread, args=(s, package, connect_delay, packet_receipt_notification, timeout), daemon=True)
 
     # a forever loop until client wants to exit

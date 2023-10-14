@@ -218,7 +218,7 @@ class DfuTransportTCP(DfuTransport):
 
     def close(self):
         super().close()
-        self.serial_port.close()
+        closeSockAndExit(self.sock, "Finished uploading fimware!")
 
     def send_init_packet(self, init_packet):
         def try_to_recover():
