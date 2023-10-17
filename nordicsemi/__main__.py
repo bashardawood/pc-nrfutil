@@ -1213,7 +1213,7 @@ def do_TCP(package, firmware_version, sock, connect_delay, packet_receipt_notifi
             buf = b''.join(b for b in buf)
             fw_version_rec = int.from_bytes(buf[2:], byteorder='little', signed=False)
 
-    print("firmware version received: " + fw_version_rec)
+    print("firmware version received: " + str(fw_version_rec))
 
     if fw_version_rec == app_firmware_version:
         # respond with up to date Magic
