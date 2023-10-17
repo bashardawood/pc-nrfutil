@@ -146,9 +146,3 @@ class Dfu:
                                                        self.manifest.application.bin_file))
 
         return total_size
-    
-    def get_fw_version(self):
-        if self.manifest.application:
-            return self.manifest.application.info_read_only_metadata.fw_version
-        else:
-            return None

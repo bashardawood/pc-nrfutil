@@ -1184,11 +1184,6 @@ def do_TCP(package, firmware_version, sock, connect_delay, packet_receipt_notifi
         DfuEvent.PROGRESS_EVENT, update_progress)
     dfu = Dfu(zip_file_path=package, dfu_transport=serial_backend,
               connect_delay=connect_delay)
-    
-    app_firmware_version = dfu.get_fw_version()
-
-    if not app_firmware_version:
-        closeSockAndExit(sock, "no application firmware found in package")
 
     sock.settimeout(timeout)
     attempts = 0
@@ -1214,14 +1209,20 @@ def do_TCP(package, firmware_version, sock, connect_delay, packet_receipt_notifi
         else:
             fw_version_rec = int.from_bytes(buf[2:], byteorder='little', signed=False)
 
+    logger.log(TRANSPORT_LOGGING_LEVEL, "firmware version received: " + fw_version_rec)
+
     if fw_version_rec == app_firmware_version:
+        # respond with up to date Magic
+        sock.send(0xDE)
+        sock.send(0xAD)
+        time.sleep(10)
         closeSockAndExit(sock, "exiting, firmware is up to date")
     elif fw_version_rec > app_firmware_version:
         closeSockAndExit(sock, "error, device firmware later than package firmware")
 
     # respond with OK Magic
-    sock.send(0xDE)
-    sock.send(0xAD)
+    sock.send(0xBE)
+    sock.send(0xEF)
 
     if logger.getEffectiveLevel() > logging.INFO:
         with click.progressbar(length=dfu.dfu_get_total_size()) as bar:
