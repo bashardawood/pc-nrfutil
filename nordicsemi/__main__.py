@@ -1158,6 +1158,10 @@ def serial(package, port, connect_delay, flow_control, packet_receipt_notificati
     do_serial(package, port, connect_delay, flow_control, packet_receipt_notification, baud_rate, serial_number, True,
               timeout)
 
+def closeSockAndExit(sock, reason):
+    logger.debug(TRANSPORT_LOGGING_LEVEL, reason)
+    sock.close()
+    sys.exit()
 
 def do_TCP(package, sock, connect_delay, packet_receipt_notification, ping,
            timeout):
@@ -1178,6 +1182,44 @@ def do_TCP(package, sock, connect_delay, packet_receipt_notification, ping,
         DfuEvent.PROGRESS_EVENT, update_progress)
     dfu = Dfu(zip_file_path=package, dfu_transport=serial_backend,
               connect_delay=connect_delay)
+    
+    app_firmware_version = dfu.get_fw_version()
+
+    if not app_firmware_version:
+        closeSockAndExit(sock, "no application firmware found in package")
+
+    sock.settimeout(timeout)
+    attempts = 0
+    buf = []
+    fw_version_rec = 0
+    while attempts < 3 and len(buf) < 6:
+        try:
+            byte = sock.recv(1)
+            if byte == b'':
+                closeSockAndExit(sock, "client exited handshake")
+            else:
+                buf.append(byte)
+        except socket.error as e:
+            logger.log(TRANSPORT_LOGGING_LEVEL, "tcp timed out")
+            attempts += 1
+    else:
+        if attempts == 3:
+            closeSockAndExit(sock, "handshake: nothing received")
+        elif len(buf) < 6: 
+            closeSockAndExit(sock, "handshake: improper data received")
+        elif buf[0] != 0xDE and buf[1] != 0xAD:
+            closeSockAndExit(sock, "handshake: improper magic received")
+        else:
+            fw_version_rec = int.from_bytes(buf[2:], byteorder='little', signed=False)
+
+    if fw_version_rec == app_firmware_version:
+        closeSockAndExit(sock, "exiting, firmware is up to date")
+    elif fw_version_rec > app_firmware_version:
+        closeSockAndExit(sock, "error, device firmware later than package firmware")
+
+    # respond with OK Magic
+    sock.send(0xDE)
+    sock.send(0xAD)
 
     if logger.getEffectiveLevel() > logging.INFO:
         with click.progressbar(length=dfu.dfu_get_total_size()) as bar:
