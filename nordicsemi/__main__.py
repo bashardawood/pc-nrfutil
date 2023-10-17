@@ -1225,8 +1225,8 @@ def do_TCP(package, firmware_version, sock, connect_delay, packet_receipt_notifi
         closeSockAndExit(sock, "error, device firmware later than package firmware")
 
     # respond with OK Magic
-    sock.send(0xBE)
-    sock.send(0xEF)
+    sock.send(b'\xbe')
+    sock.send(b'\xef')
 
     if logger.getEffectiveLevel() > logging.INFO:
         with click.progressbar(length=dfu.dfu_get_total_size()) as bar:
