@@ -1197,47 +1197,45 @@ def do_TCP(package, firmware_version, sock, connect_delay, packet_receipt_notifi
             else:
                 buf.append(byte)
         except socket.error as e:
-            logger.log(TRANSPORT_LOGGING_LEVEL, "tcp timed out")
+            print("tcp timed out")
             attempts += 1
     else:
 
-        logger.log(TRANSPORT_LOGGING_LEVEL, "data received " + buf)
+        print("data received " + str(buf))
 
-    #     if attempts == 3:
-    #         closeSockAndExit(sock, "handshake: nothing received")
-    #     elif len(buf) < 6: 
-    #         closeSockAndExit(sock, "handshake: improper data received")
-    #     elif buf[0] != 0xDE and buf[1] != 0xAD:
-    #         closeSockAndExit(sock, "handshake: improper magic received")
-    #     else:
-    #         fw_version_rec = int.from_bytes(buf[2:], byteorder='little', signed=False)
+        if attempts == 3:
+            closeSockAndExit(sock, "handshake: nothing received")
+        elif len(buf) < 6: 
+            closeSockAndExit(sock, "handshake: improper data received")
+        elif buf[0] != 0xDE and buf[1] != 0xAD:
+            closeSockAndExit(sock, "handshake: improper magic received")
+        else:
+            fw_version_rec = int.from_bytes(buf[2:], byteorder='little', signed=False)
 
+    print("firmware version received: " + fw_version_rec)
 
+    if fw_version_rec == app_firmware_version:
+        # respond with up to date Magic
+        sock.send(0xDE)
+        sock.send(0xAD)
+        time.sleep(10)
+        closeSockAndExit(sock, "exiting, firmware is up to date")
+    elif fw_version_rec > app_firmware_version:
+        closeSockAndExit(sock, "error, device firmware later than package firmware")
 
-    # logger.log(TRANSPORT_LOGGING_LEVEL, "firmware version received: " + fw_version_rec)
+    # respond with OK Magic
+    sock.send(0xBE)
+    sock.send(0xEF)
 
-    # if fw_version_rec == app_firmware_version:
-    #     # respond with up to date Magic
-    #     sock.send(0xDE)
-    #     sock.send(0xAD)
-    #     time.sleep(10)
-    #     closeSockAndExit(sock, "exiting, firmware is up to date")
-    # elif fw_version_rec > app_firmware_version:
-    #     closeSockAndExit(sock, "error, device firmware later than package firmware")
+    if logger.getEffectiveLevel() > logging.INFO:
+        with click.progressbar(length=dfu.dfu_get_total_size()) as bar:
+            global global_bar
+            global_bar = bar
+            dfu.dfu_send_images()
+    else:
+        dfu.dfu_send_images()
 
-    # # respond with OK Magic
-    # sock.send(0xBE)
-    # sock.send(0xEF)
-
-    # if logger.getEffectiveLevel() > logging.INFO:
-    #     with click.progressbar(length=dfu.dfu_get_total_size()) as bar:
-    #         global global_bar
-    #         global_bar = bar
-    #         dfu.dfu_send_images()
-    # else:
-    #     dfu.dfu_send_images()
-
-    # click.echo("Device programmed.")
+    print("Device programmed.")
 
 
 @dfu.command(short_help="Launch device firmware update server over a TCP connection.")
