@@ -1163,11 +1163,13 @@ def closeSockAndExit(sock, reason):
     sock.close()
     sys.exit()
 
-def do_TCP(package, sock, connect_delay, packet_receipt_notification, ping,
+def do_TCP(package, firmware_version, sock, connect_delay, packet_receipt_notification, ping,
            timeout):
 
     logger = logging.getLogger()
     logger.setLevel(logging.DEBUG)
+
+    app_firmware_version = convert_version_string_to_int(firmware_version)
 
     if ping is None:
         ping = False
@@ -1238,6 +1240,9 @@ def do_TCP(package, sock, connect_delay, packet_receipt_notification, ping,
               type=click.Path(exists=True, resolve_path=True,
                               file_okay=True, dir_okay=False),
               required=True)
+@click.option('--application-version-string',
+              help='The application version string, e.g. "2.7.31". Will be converted to an integer, e.g. 20731.',
+              type=click.STRING)
 @click.option('-h', '--host',
               help='TCP IP address to which the server is connected. ',
               type=click.STRING,
@@ -1258,7 +1263,7 @@ def do_TCP(package, sock, connect_delay, packet_receipt_notification, ping,
               help='Set the timeout in seconds for board to respond (default: 30 seconds)',
               type=click.INT,
               required=False)
-def TCP(package, host, port, connect_delay, packet_receipt_notification, timeout):
+def TCP(package, firmware_version, host, port, connect_delay, packet_receipt_notification, timeout):
 
     # Register the signal handlers
     signal.signal(signal.SIGTERM, service_shutdown)
@@ -1276,7 +1281,7 @@ def TCP(package, host, port, connect_delay, packet_receipt_notification, timeout
         packet_receipt_notification = 0
 
 
-    sockthread = threading.Thread(target=tcpThread, args=(s, package, connect_delay, packet_receipt_notification, timeout), daemon=True)
+    sockthread = threading.Thread(target=tcpThread, args=(s, firmware_version, package, connect_delay, packet_receipt_notification, timeout), daemon=True)
 
     # a forever loop until client wants to exit
     try:
@@ -1289,7 +1294,7 @@ def TCP(package, host, port, connect_delay, packet_receipt_notification, timeout
     except ServiceExit:
         pass
 
-def tcpThread(s, package, connect_delay, packet_receipt_notification, timeout):
+def tcpThread(s, firmware_version, package, connect_delay, packet_receipt_notification, timeout):
 
     while True:
     
@@ -1298,7 +1303,7 @@ def tcpThread(s, package, connect_delay, packet_receipt_notification, timeout):
 
         logger.info('Connected to :', addr[0], ':', addr[1])
 
-        clientThread = threading.Thread(target = do_TCP, args=(package, sock, connect_delay, packet_receipt_notification, True, timeout), daemon=True)
+        clientThread = threading.Thread(target = do_TCP, args=(package, firmware_version, sock, connect_delay, packet_receipt_notification, True, timeout), daemon=True)
 
         clientThread.start()
 
