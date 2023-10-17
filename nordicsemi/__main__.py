@@ -1217,8 +1217,8 @@ def do_TCP(package, firmware_version, sock, connect_delay, packet_receipt_notifi
 
     if fw_version_rec == app_firmware_version:
         # respond with up to date Magic
-        sock.send(0xDE)
-        sock.send(0xAD)
+        sock.send(b'\xde')
+        sock.send(b'\xad')
         time.sleep(10)
         closeSockAndExit(sock, "exiting, firmware is up to date")
     elif fw_version_rec > app_firmware_version:
