@@ -1207,9 +1207,10 @@ def do_TCP(package, firmware_version, sock, connect_delay, packet_receipt_notifi
             closeSockAndExit(sock, "handshake: nothing received")
         elif len(buf) < 6: 
             closeSockAndExit(sock, "handshake: improper data received")
-        elif buf[0] != 0xDE and buf[1] != 0xAD:
+        elif buf[0] != b'\xde' and buf[1] != b'\xad':
             closeSockAndExit(sock, "handshake: improper magic received")
         else:
+            buf = b''.join(b for b in buf)
             fw_version_rec = int.from_bytes(buf[2:], byteorder='little', signed=False)
 
     print("firmware version received: " + fw_version_rec)
