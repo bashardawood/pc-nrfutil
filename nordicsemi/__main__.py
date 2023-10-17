@@ -1241,9 +1241,10 @@ def do_TCP(package, firmware_version, sock, connect_delay, packet_receipt_notifi
               type=click.Path(exists=True, resolve_path=True,
                               file_okay=True, dir_okay=False),
               required=True)
-@click.option('--application-version-string',
+@click.option('-v', '--firmware-version',
               help='The application version string, e.g. "2.7.31". Will be converted to an integer, e.g. 20731.',
-              type=click.STRING)
+              type=click.STRING,
+              required= True)
 @click.option('-h', '--host',
               help='TCP IP address to which the server is connected. ',
               type=click.STRING,
